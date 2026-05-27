@@ -1,0 +1,13 @@
+apiVersion: skaffold/v4beta7
+kind: Config
+profiles:
+  - name: dev
+    manifests: { rawYaml: [manifests/service-dev.yaml] }
+  - name: stg
+    manifests: { rawYaml: [manifests/service-stg.yaml] }
+  # - name: uat
+  #   manifests: { rawYaml: [manifests/service-uat.yaml] }
+  # - name: prd
+  #   manifests: { rawYaml: [manifests/service-prd.yaml] }
+deploy:
+  cloudrun: {}

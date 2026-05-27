@@ -1,0 +1,60 @@
+name: Build & Release (hello-canary)
+
+on:
+    push:
+        branches: [ main ]
+    workflow_dispatch:
+
+env:
+    PROJECT_ID: my-project
+    REGION: us-central1
+    REPO: hello-canary
+    IMAGE_NAME: app
+    PIPELINE: hello-canary-pipeline
+
+jobs:
+    build-and-release:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            id-token: write # only needed if you switch to WIF later
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: google-github-actions/auth@v2
+              with:
+                  credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+            - uses: google-github-actions/setup-gcloud@v2
+
+            - name: Configure Docker for Artifact Registry
+              run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+            - name: Build & push image
+              id: build
+              run: |
+                  IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}:${GITHUB_SHA::7}"
+                  docker build -t "$IMAGE" .
+                  docker push "$IMAGE"
+                  echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+            - name: Create Cloud Deploy release
+              id: release
+              uses: google-github-actions/create-cloud-deploy-release@v1
+              with:
+                  project_id: ${{ env.PROJECT_ID }}
+                  region: ${{ env.REGION }}
+                  delivery_pipeline: ${{ env.PIPELINE }}
+                  name: rel-${{ github.run_id }}-${{ github.run_attempt }}
+                  source: deploy
+                  images: |-
+                      hello-app=${{ steps.build.outputs.image }}
+                  description: "GHA ${{ github.run_id }} · ${{ github.sha }}"
+                  annotations: |-
+                      commit-sha=${{ github.sha }}
+                      actor=${{ github.actor }}
+
+            - name: Show release link
+              run: |
+                  echo "Release: ${{ steps.release.outputs.name }}"
+                  echo "Link:    ${{ steps.release.outputs.link }}"

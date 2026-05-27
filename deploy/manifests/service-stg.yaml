@@ -1,0 +1,13 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: hello-canary-stg
+spec:
+  template:
+    spec:
+      serviceAccountName: hello-canary-sa@humblebundle-stg.iam.gserviceaccount.com
+      containers:
+        - image: hello-app # placeholder — replaced at release time
+          env:
+            - name: APP_ENV
+              value: stg

@@ -1,0 +1,30 @@
+name: Rollback
+
+on:
+    workflow_dispatch:
+        inputs:
+            target:
+                description: "Target"
+                required: true
+                type: choice
+                options: [ hello-canary-dev, hello-canary-stg, hello-canary-uat, hello-canary-prd ]
+            release:
+                description: "Release name to roll back to (leave blank for previous)"
+                required: false
+
+jobs:
+    rollback:
+        runs-on: ubuntu-latest
+        environment: ${{ inputs.target }} # GH approval gate
+        steps:
+            - uses: google-github-actions/auth@v2
+              with:
+                  credentials_json: ${{ secrets.GCP_SA_KEY }}
+            - uses: google-github-actions/setup-gcloud@v2
+            - run: |
+                  ARGS="--delivery-pipeline=hello-canary-pipeline --region=us-central1 --project=my-project --quiet"
+                  if [[ -n "${{ inputs.release }}" ]]; then
+                    gcloud deploy targets rollback ${{ inputs.target }} --release=${{ inputs.release }} $ARGS
+                  else
+                    gcloud deploy targets rollback ${{ inputs.target }} $ARGS
+                  fi
