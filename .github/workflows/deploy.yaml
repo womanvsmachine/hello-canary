@@ -2,11 +2,11 @@ name: Build & Release (hello-canary)
 
 on:
     push:
-        branches: [ main ]
+        branches: [main]
     workflow_dispatch:
 
 env:
-    PROJECT_ID: my-project
+    PROJECT_ID: humblebundle-stg
     REGION: us-central1
     REPO: hello-canary
     IMAGE_NAME: app
