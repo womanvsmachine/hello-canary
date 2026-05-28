@@ -1,0 +1,43 @@
+name: Promote Release
+
+on:
+    workflow_dispatch:
+        inputs:
+            release:
+                description: "Release name (e.g. rel-12345-1)"
+                required: true
+                type: string
+            to_target:
+                description: "Target to promote to"
+                required: true
+                type: choice
+                options:
+                    - hello-canary-stg
+                    # - hello-canary-uat
+                    # - hello-canary-prd
+
+env:
+    PROJECT_ID: humblebundle-stg
+    REGION: us-central1
+    PIPELINE: hello-canary-pipeline
+
+jobs:
+    promote:
+        runs-on: ubuntu-latest
+        environment: ${{ inputs.to_target == 'hello-canary-stg' && 'stg' || 'prd' }}
+        steps:
+            - uses: google-github-actions/auth@v3
+              with:
+                  credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+            - uses: google-github-actions/setup-gcloud@v3
+
+            - name: Promote release
+              run: |
+                  gcloud deploy releases promote \
+                    --release=${{ inputs.release }} \
+                    --delivery-pipeline=${{ env.PIPELINE }} \
+                    --to-target=${{ inputs.to_target }} \
+                    --region=${{ env.REGION }} \
+                    --project=${{ env.PROJECT_ID }} \
+                    --quiet
