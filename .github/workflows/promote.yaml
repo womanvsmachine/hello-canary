@@ -1,43 +1,67 @@
 name: Promote Release
 
 on:
-    workflow_dispatch:
-        inputs:
-            release:
-                description: "Release name (e.g. rel-12345-1)"
-                required: true
-                type: string
-            to_target:
-                description: "Target to promote to"
-                required: true
-                type: choice
-                options:
-                    - hello-canary-stg
-                    # - hello-canary-uat
-                    # - hello-canary-prd
+  workflow_dispatch:
+    inputs:
+      to_target:
+        description: "Target to promote to"
+        required: true
+        type: choice
+        options:
+          - hello-canary-uat
+          - hello-canary-prd
+      release:
+        description: "Release name (leave blank for latest)"
+        required: false
+        type: string
 
 env:
-    PROJECT_ID: humblebundle-stg
-    REGION: us-central1
-    PIPELINE: hello-canary-pipeline
+  PROJECT_ID: humblebundle-stg
+  REGION: us-central1
+  PIPELINE: hello-canary-pipeline
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-    promote:
-        runs-on: ubuntu-latest
-        environment: ${{ inputs.to_target == 'hello-canary-stg' && 'stg' || 'prd' }}
-        steps:
-            - uses: google-github-actions/auth@v3
-              with:
-                  credentials_json: ${{ secrets.GCP_SA_KEY }}
+  promote:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.to_target == 'hello-canary-uat' && 'uat' || 'prd' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # --- Auth (POC: JSON key) ---
+      - uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      # --- Auth (Production: WIF) — see deploy-dev.yaml for setup ---
+      # - uses: google-github-actions/auth@v3
+      #   with:
+      #     workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+      #     service_account: ${{ vars.WIF_SA }}
 
-            - uses: google-github-actions/setup-gcloud@v3
+      - uses: google-github-actions/setup-gcloud@v3
 
-            - name: Promote release
-              run: |
-                  gcloud deploy releases promote \
-                    --release=${{ inputs.release }} \
-                    --delivery-pipeline=${{ env.PIPELINE }} \
-                    --to-target=${{ inputs.to_target }} \
-                    --region=${{ env.REGION }} \
-                    --project=${{ env.PROJECT_ID }} \
-                    --quiet
+      - id: release
+        run: |
+          if [[ -n "${{ inputs.release }}" ]]; then
+            REL="${{ inputs.release }}"
+          else
+            REL=$(gcloud deploy releases list \
+              --delivery-pipeline=${{ env.PIPELINE }} \
+              --region=${{ env.REGION }} \
+              --project=${{ env.PROJECT_ID }} \
+              --limit=1 \
+              --format='value(name.basename())')
+          fi
+          echo "name=$REL" >> "$GITHUB_OUTPUT"
+          echo "Promoting: $REL → ${{ inputs.to_target }}"
+
+      - name: Promote
+        run: |
+          gcloud deploy releases promote \
+            --release=${{ steps.release.outputs.name }} \
+            --delivery-pipeline=${{ env.PIPELINE }} \
+            --to-target=${{ inputs.to_target }} \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --quiet
