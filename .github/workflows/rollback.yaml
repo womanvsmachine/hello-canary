@@ -1,30 +1,57 @@
 name: Rollback
 
 on:
-    workflow_dispatch:
-        inputs:
-            target:
-                description: "Target"
-                required: true
-                type: choice
-                options: [ hello-canary-dev, hello-canary-stg, hello-canary-uat, hello-canary-prd ]
-            release:
-                description: "Release name to roll back to (leave blank for previous)"
-                required: false
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target to roll back"
+        required: true
+        type: choice
+        options:
+          - hello-canary-dev
+          - hello-canary-stg
+          - hello-canary-uat
+          - hello-canary-prd
+      release:
+        description: "Release to roll back TO (leave blank for previous successful)"
+        required: false
+        type: string
+
+env:
+  PROJECT_ID: humblebundle-stg
+  REGION: us-central1
+  PIPELINE: hello-canary-pipeline
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-    rollback:
-        runs-on: ubuntu-latest
-        environment: ${{ inputs.target }} # GH approval gate
-        steps:
-            - uses: google-github-actions/auth@v2
-              with:
-                  credentials_json: ${{ secrets.GCP_SA_KEY }}
-            - uses: google-github-actions/setup-gcloud@v2
-            - run: |
-                  ARGS="--delivery-pipeline=hello-canary-pipeline --region=us-central1 --project=my-project --quiet"
-                  if [[ -n "${{ inputs.release }}" ]]; then
-                    gcloud deploy targets rollback ${{ inputs.target }} --release=${{ inputs.release }} $ARGS
-                  else
-                    gcloud deploy targets rollback ${{ inputs.target }} $ARGS
-                  fi
+  rollback:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target == 'hello-canary-dev' && 'dev' || (inputs.target == 'hello-canary-stg' && 'stg' || (inputs.target == 'hello-canary-uat' && 'uat' || 'prd')) }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # --- Auth (POC: JSON key) ---
+      - uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      # --- Auth (Production: WIF) — see deploy-dev.yaml for setup ---
+      # - uses: google-github-actions/auth@v3
+      #   with:
+      #     workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+      #     service_account: ${{ vars.WIF_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Rollback
+        run: |
+          ARGS="--delivery-pipeline=${{ env.PIPELINE }} \
+                --region=${{ env.REGION }} \
+                --project=${{ env.PROJECT_ID }} \
+                --quiet"
+          if [[ -n "${{ inputs.release }}" ]]; then
+            gcloud deploy targets rollback ${{ inputs.target }} \
+              --release=${{ inputs.release }} $ARGS
+          else
+            gcloud deploy targets rollback ${{ inputs.target }} $ARGS
+          fi
