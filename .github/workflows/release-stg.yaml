@@ -1,0 +1,80 @@
+name: Release to stg
+
+on:
+  release:
+    types: [published]
+
+env:
+  PROJECT_ID: humblebundle-stg
+  REGION: us-central1
+  REPO: hello-canary
+  IMAGE_NAME: app
+  PIPELINE: hello-canary-pipeline
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  release-to-stg:
+    runs-on: ubuntu-latest
+    environment: stg
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      # --- Auth (POC: JSON key) ---
+      - uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      # --- Auth (Production: WIF) — see deploy-dev.yaml for setup ---
+      # - uses: google-github-actions/auth@v3
+      #   with:
+      #     workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+      #     service_account: ${{ vars.WIF_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - id: name
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          SAFE=$(echo "$TAG" | tr '[:upper:]' '[:lower:]' | tr '.' '-' | tr -cd 'a-z0-9-')
+          echo "release_name=rel-${SAFE}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - id: build
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}:${{ steps.name.outputs.image_tag }}"
+          docker build --platform=linux/amd64 -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/create-cloud-deploy-release@v1
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          region: ${{ env.REGION }}
+          delivery_pipeline: ${{ env.PIPELINE }}
+          name: ${{ steps.name.outputs.release_name }}
+          source: deploy
+          images: |-
+            hello-app=${{ steps.build.outputs.image }}
+          disable_initial_rollout: 'true'
+          description: "GH Release ${{ github.event.release.tag_name }}"
+          annotations: |-
+            github-tag=${{ github.event.release.tag_name }}
+            commit-sha=${{ github.sha }}
+            actor=${{ github.actor }}
+            trigger=github-release
+
+      - name: Promote to stg
+        run: |
+          gcloud deploy releases promote \
+            --release=${{ steps.name.outputs.release_name }} \
+            --delivery-pipeline=${{ env.PIPELINE }} \
+            --to-target=hello-canary-stg \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --quiet

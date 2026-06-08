@@ -1,0 +1,79 @@
+name: Deploy Dev
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: humblebundle-stg
+  REGION: us-central1
+  REPO: hello-canary
+  IMAGE_NAME: app
+  PIPELINE: hello-canary-pipeline
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write   # required when we switch to WIF; harmless now
+    steps:
+      - uses: actions/checkout@v5
+
+      # --- Auth (POC: JSON key) ---
+      - uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      # --- Auth (Production: WIF) — swap in after moving repo to humble org ---
+      # 1. Run: gcloud iam service-accounts add-iam-policy-binding \
+      #      hello-canary-sa@humblebundle-stg.iam.gserviceaccount.com \
+      #      --project=humblebundle-stg \
+      #      --role=roles/iam.workloadIdentityUser \
+      #      --member="principalSet://iam.googleapis.com/projects/631460809730/locations/global/workloadIdentityPools/github-actions-pool/attribute.repository/humble/hello-canary"
+      # 2. Add GH repo Variables (not Secrets):
+      #      WIF_PROVIDER = projects/631460809730/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-oidc
+      #      WIF_SA       = hello-canary-sa@humblebundle-stg.iam.gserviceaccount.com
+      # 3. Delete GCP_SA_KEY secret and the SA's user-managed key.
+      # 4. Replace the auth step above with:
+      # - uses: google-github-actions/auth@v3
+      #   with:
+      #     workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+      #     service_account: ${{ vars.WIF_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - id: build
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}:${GITHUB_SHA::7}"
+          docker build --platform=linux/amd64 -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - id: release
+        uses: google-github-actions/create-cloud-deploy-release@v1
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          region: ${{ env.REGION }}
+          delivery_pipeline: ${{ env.PIPELINE }}
+          name: rel-${{ github.run_id }}-${{ github.run_attempt }}
+          source: deploy
+          images: |-
+            hello-app=${{ steps.build.outputs.image }}
+          description: "Dev: ${{ github.sha }}"
+          annotations: |-
+            commit-sha=${{ github.sha }}
+            actor=${{ github.actor }}
+            trigger=push-main
+
+      - run: |
+          echo "Release: ${{ steps.release.outputs.name }}"
+          echo "Link:    ${{ steps.release.outputs.link }}"
