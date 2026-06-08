@@ -7,14 +7,10 @@ serialPipeline:
   stages:
     - targetId: hello-canary-dev
       profiles: [dev]
+      # standard rollout (no canary)
       strategy:
-        canary:
-          runtimeConfig:
-            cloudRun:
-              automaticTrafficControl: true
-          canaryDeployment:
-            percentages: [25, 75]
-            verify: false
+        standard:
+          verify: false
     - targetId: hello-canary-stg
       profiles: [stg]
       strategy:
