@@ -7,10 +7,8 @@ serialPipeline:
   stages:
     - targetId: hello-canary-dev
       profiles: [dev]
-      # standard rollout (no canary)
       strategy:
-        standard:
-          verify: false
+        standard: {}
     - targetId: hello-canary-stg
       profiles: [stg]
       strategy:
