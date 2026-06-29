@@ -29,4 +29,8 @@ verify:
         - { name: ERROR_RATE_THRESHOLD, value: "0.05" }
         - { name: MIN_REQUESTS, value: "10" }
         - { name: WINDOW_SECONDS, value: "300" }
-        - { name: BAKE_SECONDS, value: "150" }
+        # Poll for data rather than a fixed bake — Datadog's GCP integration lags several
+        # minutes, so a fixed short bake reads an empty window and false-passes.
+        - { name: BAKE_SECONDS, value: "30" }
+        - { name: POLL_TIMEOUT, value: "420" }
+        - { name: POLL_INTERVAL, value: "30" }

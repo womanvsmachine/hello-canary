@@ -28,8 +28,13 @@ Config is via env (only SERVICE is required; the rest default sanely):
                           SKIPS (passes) so a no-traffic canary (hello-canary,
                           storybook) is never gated on absent signal (default: 20).
   WINDOW_SECONDS          Look-back window (default: 300).
-  BAKE_SECONDS            Sleep before querying so the canary soaks and the Datadog
-                          GCP-integration metric lag (~1-2 min) settles (default: 0).
+  BAKE_SECONDS            Initial soak before polling starts (default: 30).
+  POLL_TIMEOUT            Max seconds to wait for Datadog to ingest enough data before
+                          judging. The GCP integration lags several minutes, so a single
+                          query after a short bake can read an empty window and false-pass;
+                          instead we poll until there are >= MIN_REQUESTS or this timeout
+                          (default: 420). No data by the timeout => SKIP (no-traffic canary).
+  POLL_INTERVAL           Seconds between polls while waiting for data (default: 30).
 
 Exit codes: 0 = pass (or skipped, no signal); 1 = breach (roll back);
 2 = config/credential error (treated as a verify failure by Cloud Deploy).
@@ -167,21 +172,35 @@ def main():
         window = int(_env("WINDOW_SECONDS", "300"))
 
         revision = _env("REVISION") or newest_revision(service, region, project)
-
-        bake = int(_env("BAKE_SECONDS", "0"))
-        if bake > 0:
-            print(f"[canary-verify] baking {bake}s so the canary soaks + Datadog metrics settle...")
-            time.sleep(bake)
-
-        to = int(time.time())
-        frm = to - window
         scope = f"service_name:{service},revision_name:{revision}"
 
-        total = query_metric(site, api_key, app_key,
-                             f"sum:gcp.run.request_count{{{scope}}}.as_count()", frm, to)
-        errors = query_metric(site, api_key, app_key,
-                             f"sum:gcp.run.request_count{{{scope},response_code_class:5xx}}.as_count()",
-                             frm, to)
+        bake = int(_env("BAKE_SECONDS", "30"))
+        poll_timeout = int(_env("POLL_TIMEOUT", "420"))
+        poll_interval = int(_env("POLL_INTERVAL", "30"))
+        if bake > 0:
+            print(f"[canary-verify] initial soak {bake}s...")
+            time.sleep(bake)
+
+        # Poll until Datadog has ingested enough data to judge (the GCP integration lags
+        # several minutes) or the timeout elapses — THEN judge. A single query after a fixed
+        # bake can read an empty window and false-pass a broken canary. Once there are enough
+        # requests we stop early; if none arrive by the timeout, evaluate() returns SKIP.
+        deadline = time.time() + poll_timeout
+        total = errors = 0.0
+        while True:
+            to = int(time.time())
+            frm = to - window
+            total = query_metric(site, api_key, app_key,
+                                 f"sum:gcp.run.request_count{{{scope}}}.as_count()", frm, to)
+            if total >= min_requests:
+                errors = query_metric(site, api_key, app_key,
+                    f"sum:gcp.run.request_count{{{scope},response_code_class:5xx}}.as_count()", frm, to)
+                break
+            if time.time() >= deadline:
+                break
+            print(f"[canary-verify] {total:.0f} requests so far (need {min_requests:.0f}); "
+                  f"waiting {poll_interval}s for Datadog to ingest...")
+            time.sleep(poll_interval)
 
         passed, reason = evaluate(total, errors, threshold, min_requests)
         print(f"[canary-verify] {service}@{revision}: {reason}")
