@@ -11,7 +11,10 @@ come from the Datadog GCP integration's per-revision `gcp.run.request_count`,
 tagged by {service_name, revision_name, response_code_class}.
 
 Config is via env (only SERVICE is required; the rest default sanely):
-  DD_API_KEY, DD_APP_KEY  Datadog credentials (injected from Secret Manager).
+  DD_API_KEY, DD_APP_KEY  Datadog credentials. If unset, they are read from Secret
+                          Manager (DD_API_KEY_SECRET / DD_APP_KEY_SECRET in PROJECT,
+                          defaulting to humble-shared-stg-datadog-{api,app}key) — the
+                          Cloud Deploy execution SA fetches them at verify time.
   DD_SITE                 Datadog site (default: datadoghq.com).
   SERVICE                 Cloud Run service, e.g. hello-canary-stg (required).
   REVISION                Revision to judge; default = newest revision of SERVICE
@@ -22,6 +25,8 @@ Config is via env (only SERVICE is required; the rest default sanely):
                           SKIPS (passes) so a no-traffic canary (hello-canary,
                           storybook) is never gated on absent signal (default: 20).
   WINDOW_SECONDS          Look-back window (default: 300).
+  BAKE_SECONDS            Sleep before querying so the canary soaks and the Datadog
+                          GCP-integration metric lag (~1-2 min) settles (default: 0).
 
 Exit codes: 0 = pass (or skipped, no signal); 1 = breach (roll back);
 2 = config/credential error (treated as a verify failure by Cloud Deploy).
@@ -45,6 +50,30 @@ def _env(name, default=None, required=False):
     if required and not val:
         raise ConfigError(f"missing required env {name}")
     return val
+
+
+def _fetch_secret(secret, project):
+    """Latest enabled version of a Secret Manager secret (via gcloud)."""
+    return subprocess.check_output(
+        ["gcloud", "secrets", "versions", "access", "latest",
+         "--secret", secret, "--project", project],
+        text=True,
+    ).strip()
+
+
+def resolve_key(env_name, secret_env, default_secret, project):
+    """A Datadog key from its env var, else from Secret Manager."""
+    val = os.environ.get(env_name)
+    if val:
+        return val
+    secret = os.environ.get(secret_env, default_secret)
+    try:
+        key = _fetch_secret(secret, project)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise ConfigError(f"{env_name} not set and Secret Manager fetch of {secret} failed: {e}")
+    if not key:
+        raise ConfigError(f"{env_name} not set and secret {secret} is empty")
+    return key
 
 
 def newest_revision(service, region, project):
@@ -110,15 +139,23 @@ def main():
     try:
         service = _env("SERVICE", required=True)
         site = _env("DD_SITE", "datadoghq.com")
-        api_key = _env("DD_API_KEY", required=True)
-        app_key = _env("DD_APP_KEY", required=True)
         region = _env("REGION", "us-central1")
         project = _env("PROJECT", "humblebundle-stg")
+        api_key = resolve_key("DD_API_KEY", "DD_API_KEY_SECRET",
+                              "humble-shared-stg-datadog-apikey", project)
+        app_key = resolve_key("DD_APP_KEY", "DD_APP_KEY_SECRET",
+                              "humble-shared-stg-datadog-appkey", project)
         threshold = float(_env("ERROR_RATE_THRESHOLD", "0.05"))
         min_requests = float(_env("MIN_REQUESTS", "20"))
         window = int(_env("WINDOW_SECONDS", "300"))
 
         revision = _env("REVISION") or newest_revision(service, region, project)
+
+        bake = int(_env("BAKE_SECONDS", "0"))
+        if bake > 0:
+            print(f"[canary-verify] baking {bake}s so the canary soaks + Datadog metrics settle...")
+            time.sleep(bake)
+
         to = int(time.time())
         frm = to - window
         scope = f"service_name:{service},revision_name:{revision}"

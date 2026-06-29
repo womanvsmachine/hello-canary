@@ -1,5 +1,30 @@
 """Offline unit tests for the canary verify decision logic (HBNXT-2108)."""
+import os
+from unittest import mock
+
 import check_error_rate as cv
+
+
+def test_resolve_key_prefers_env():
+    with mock.patch.dict(os.environ, {"DD_API_KEY": "from-env"}):
+        assert cv.resolve_key("DD_API_KEY", "DD_API_KEY_SECRET", "sec", "proj") == "from-env"
+
+
+def test_resolve_key_falls_back_to_secret_manager():
+    with mock.patch.dict(os.environ, {}, clear=True), \
+         mock.patch.object(cv, "_fetch_secret", return_value="from-sm") as f:
+        assert cv.resolve_key("DD_API_KEY", "DD_API_KEY_SECRET", "default-sec", "proj") == "from-sm"
+        f.assert_called_once_with("default-sec", "proj")
+
+
+def test_resolve_key_empty_secret_raises():
+    with mock.patch.dict(os.environ, {}, clear=True), \
+         mock.patch.object(cv, "_fetch_secret", return_value=""):
+        try:
+            cv.resolve_key("DD_API_KEY", "DD_API_KEY_SECRET", "sec", "proj")
+            assert False, "expected ConfigError"
+        except cv.ConfigError:
+            pass
 
 
 def test_skip_below_min_requests():
