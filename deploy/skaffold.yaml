@@ -11,3 +11,26 @@ profiles:
   #   manifests: { rawYaml: [manifests/service-prd.yaml] }
 deploy:
   cloudrun: {}
+# Canary analysis (HBNXT-2108): runs only where the strategy sets verify:true (stg).
+# Queries Datadog for the new revision's 5xx rate; non-zero exit fails the phase and
+# trips the auto-rollback Automation. DD keys are self-fetched from Secret Manager by
+# the execution SA. Image is :latest (sandbox); pin per-release for prod.
+verify:
+  - name: canary-error-rate
+    container:
+      name: canary-error-rate
+      image: us-central1-docker.pkg.dev/humblebundle-stg/hello-canary/verify:latest
+      env:
+        # CANARY_PROJECT_ID (not PROJECT): Cloud Deploy overrides PROJECT with the
+        # numeric project number, which `gcloud run` rejects.
+        - { name: CANARY_PROJECT_ID, value: humblebundle-stg }
+        - { name: SERVICE, value: hello-canary-stg }
+        - { name: REGION, value: us-central1 }
+        - { name: ERROR_RATE_THRESHOLD, value: "0.05" }
+        - { name: MIN_REQUESTS, value: "10" }
+        - { name: WINDOW_SECONDS, value: "300" }
+        # Poll for data rather than a fixed bake. Gate uses Cloud Monitoring (~1-2min lag),
+        # so a shorter timeout suffices than Datadog would have needed.
+        - { name: BAKE_SECONDS, value: "30" }
+        - { name: POLL_TIMEOUT, value: "240" }
+        - { name: POLL_INTERVAL, value: "30" }

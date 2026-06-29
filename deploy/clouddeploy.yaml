@@ -18,7 +18,7 @@ serialPipeline:
               automaticTrafficControl: true
           canaryDeployment:
             percentages: [25, 75]
-            verify: false
+            verify: true
     # - targetId: hello-canary-uat
     #   profiles: [uat]
     #   strategy:
@@ -58,10 +58,34 @@ metadata:
 description: hello-canary — stg (approval required)
 requireApproval: true
 executionConfigs:
-  - usages: [RENDER, DEPLOY]
+  # VERIFY usage so the canary verify phase runs as the execution SA (which has
+  # secretAccessor on the Datadog keys + can list Cloud Run revisions).
+  - usages: [RENDER, DEPLOY, VERIFY]
     serviceAccount: hello-canary-sa@humblebundle-stg.iam.gserviceaccount.com
 run:
   location: projects/humblebundle-stg/locations/us-central1
+---
+# Auto-advance canary phases; roll the rollout back on a failed phase (e.g. a
+# verify breach). Without this the rollout pauses for a manual advance and a failed
+# verify just stalls instead of reverting. Mirrors the A1 dev-pipeline automation
+# (HBNXT-2447). NOTE: hello-canary-sa is a sandbox SA — swap for a real deploy SA at
+# cutover (HBNXT-359).
+apiVersion: deploy.cloud.google.com/v1
+kind: Automation
+metadata:
+  name: hello-canary-pipeline/canary-auto
+description: Auto-advance canary phases; roll back on a failed phase.
+serviceAccount: hello-canary-sa@humblebundle-stg.iam.gserviceaccount.com
+selector:
+  targets:
+    - id: hello-canary-stg
+rules:
+  - advanceRolloutRule:
+      id: auto-advance
+  - repairRolloutRule:
+      id: auto-rollback
+      repairPhases:
+        - rollback: {}
 # ---
 # apiVersion: deploy.cloud.google.com/v1
 # kind: Target

@@ -39,6 +39,13 @@ jobs:
                   docker push "$IMAGE"
                   echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
+            # Keep the canary verify image current (skaffold references verify:latest).
+            - name: Build & push verify image
+              run: |
+                  VIMG="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/verify:latest"
+                  docker build --platform=linux/amd64 -t "$VIMG" deploy/verify
+                  docker push "$VIMG"
+
             - name: Create Cloud Deploy release
               id: release
               uses: google-github-actions/create-cloud-deploy-release@v1
