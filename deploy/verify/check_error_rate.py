@@ -1,44 +1,37 @@
 #!/usr/bin/env python3
-"""Datadog canary verify for Cloud Deploy (HBNXT-359 / HBNXT-2108).
+"""Canary verify for Cloud Deploy (HBNXT-359 / HBNXT-2108).
 
 Runs as a skaffold `verify` action during the Cloud Deploy canary phase. Queries
-Datadog for the newly-deployed Cloud Run revision's HTTP 5xx error rate over a
-short window and FAILS (non-zero exit) when it breaches the threshold — which
-trips the Cloud Deploy automation rollback rule and reverts the canary.
+Cloud Monitoring for the newly-deployed Cloud Run revision's HTTP 5xx error rate over
+a short window and FAILS (non-zero exit) when it breaches the threshold — which trips
+the Cloud Deploy auto-rollback automation.
 
-Datadog is the authoritative signal (per the 2026-06-12 incident review). Metrics
-come from the Datadog GCP integration's per-revision `gcp.run.request_count`,
-tagged by {service_name, revision_name, response_code_class}.
+Why Cloud Monitoring and not Datadog: Datadog's GCP-integration ingestion lag (>7 min
+observed) is too slow to gate the early canary phase — the bad revision advances before
+the metric arrives. Cloud Monitoring's native `run.googleapis.com/request_count` lags
+only ~1-2 min. Datadog stays authoritative for the dashboard + alerting (separate).
 
 Config is via env (only SERVICE is required; the rest default sanely):
-  DD_API_KEY, DD_APP_KEY  Datadog credentials. If unset, they are read from Secret
-                          Manager (DD_API_KEY_SECRET / DD_APP_KEY_SECRET in PROJECT,
-                          defaulting to humble-shared-stg-datadog-{api,app}key) — the
-                          Cloud Deploy execution SA fetches them at verify time.
-  DD_SITE                 Datadog site (default: datadoghq.com).
   SERVICE                 Cloud Run service, e.g. hello-canary-stg (required).
-  REVISION                Revision to judge; default = newest revision of SERVICE
-                          (looked up via gcloud).
-  REGION                  Cloud Run location for the revision lookup (default us-central1).
-  CANARY_PROJECT_ID       Project ID for revision/secret lookups. Preferred over PROJECT,
-                          which Cloud Deploy overrides with the numeric project NUMBER
-                          (gcloud run rejects numbers). Falls back to humblebundle-stg.
-  ERROR_RATE_THRESHOLD    Max acceptable 5xx fraction (default: 0.05 = 5%).
-  MIN_REQUESTS            Min requests in-window to judge; below this the check
-                          SKIPS (passes) so a no-traffic canary (hello-canary,
-                          storybook) is never gated on absent signal (default: 20).
-  WINDOW_SECONDS          Look-back window (default: 300).
-  BAKE_SECONDS            Initial soak before polling starts (default: 30).
-  POLL_TIMEOUT            Max seconds to wait for Datadog to ingest enough data before
-                          judging. The GCP integration lags several minutes, so a single
-                          query after a short bake can read an empty window and false-pass;
-                          instead we poll until there are >= MIN_REQUESTS or this timeout
-                          (default: 420). No data by the timeout => SKIP (no-traffic canary).
-  POLL_INTERVAL           Seconds between polls while waiting for data (default: 30).
+  CANARY_PROJECT_ID       Project ID for the lookups (preferred; PROJECT is overridden by
+                          Cloud Deploy with the numeric project number). Falls back to
+                          humblebundle-stg.
+  REGION                  Cloud Run location (default us-central1).
+  REVISION                Revision to judge; default = newest revision of SERVICE.
+  ERROR_RATE_THRESHOLD    Max acceptable 5xx fraction (default 0.05 = 5%).
+  MIN_REQUESTS            Min requests in-window to judge; below this -> SKIP (pass) so a
+                          no-traffic canary isn't gated on absent signal (default 10).
+  WINDOW_SECONDS          Look-back window (default 300).
+  BAKE_SECONDS            Initial soak before polling (default 30).
+  POLL_TIMEOUT            Max seconds to wait for metrics to settle before judging; poll
+                          until >= MIN_REQUESTS or this timeout (default 240). No data by
+                          the timeout => SKIP.
+  POLL_INTERVAL           Seconds between polls (default 30).
 
-Exit codes: 0 = pass (or skipped, no signal); 1 = breach (roll back);
+Exit codes: 0 = pass (or SKIP, no signal); 1 = breach (roll back);
 2 = config/credential error (treated as a verify failure by Cloud Deploy).
 """
+import datetime
 import json
 import os
 import subprocess
@@ -61,37 +54,13 @@ def _env(name, default=None, required=False):
 
 
 def pick_project(canary_project_id, project_env, default="humblebundle-stg"):
-    """Resolve the project ID for gcloud lookups.
+    """Resolve the project ID for gcloud/Monitoring lookups.
 
     Cloud Deploy injects PROJECT as the numeric project NUMBER, which `gcloud run`
     rejects — so prefer CANARY_PROJECT_ID and never trust a numeric/empty value.
     """
     p = canary_project_id or project_env or ""
     return default if (not p or p.isdigit()) else p
-
-
-def _fetch_secret(secret, project):
-    """Latest enabled version of a Secret Manager secret (via gcloud)."""
-    return subprocess.check_output(
-        ["gcloud", "secrets", "versions", "access", "latest",
-         "--secret", secret, "--project", project],
-        text=True,
-    ).strip()
-
-
-def resolve_key(env_name, secret_env, default_secret, project):
-    """A Datadog key from its env var, else from Secret Manager."""
-    val = os.environ.get(env_name)
-    if val:
-        return val
-    secret = os.environ.get(secret_env, default_secret)
-    try:
-        key = _fetch_secret(secret, project)
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        raise ConfigError(f"{env_name} not set and Secret Manager fetch of {secret} failed: {e}")
-    if not key:
-        raise ConfigError(f"{env_name} not set and secret {secret} is empty")
-    return key
 
 
 def newest_revision(service, region, project):
@@ -113,34 +82,60 @@ def newest_revision(service, region, project):
     return rev
 
 
-def query_metric(site, api_key, app_key, query, frm, to):
-    """Run a Datadog v1 timeseries query; return the summed point value."""
-    url = (f"https://api.{site}/api/v1/query"
-           f"?from={frm}&to={to}&query={urllib.parse.quote(query)}")
-    req = urllib.request.Request(url, headers={
-        "DD-API-KEY": api_key,
-        "DD-APPLICATION-KEY": app_key,
-    })
+def access_token():
+    """OAuth access token for the execution SA (via gcloud / ADC)."""
+    try:
+        return subprocess.check_output(
+            ["gcloud", "auth", "print-access-token"], text=True, stderr=subprocess.STDOUT).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        out = getattr(e, "output", "") or ""
+        raise ConfigError(f"could not get access token: {out.strip() or e}")
+
+
+def _rfc3339(epoch):
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def request_count(project, token, service, revision, frm, to, window, only_5xx=False):
+    """Summed Cloud Run request_count for a revision over [frm, to] (optionally 5xx only)."""
+    flt = ('metric.type="run.googleapis.com/request_count" '
+           'resource.type="cloud_run_revision" '
+           f'resource.labels.service_name="{service}" '
+           f'resource.labels.revision_name="{revision}"')
+    if only_5xx:
+        flt += ' metric.labels.response_code_class="5xx"'
+    params = {
+        "filter": flt,
+        "interval.startTime": _rfc3339(frm),
+        "interval.endTime": _rfc3339(to),
+        "aggregation.alignmentPeriod": f"{window}s",
+        "aggregation.perSeriesAligner": "ALIGN_SUM",
+        "aggregation.crossSeriesReducer": "REDUCE_SUM",
+        "view": "FULL",
+    }
+    url = (f"https://monitoring.googleapis.com/v3/projects/{project}/timeSeries?"
+           + urllib.parse.urlencode(params))
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        raise ConfigError(f"Datadog query failed ({e.code}): {e.read().decode()[:200]}")
+        raise ConfigError(f"Cloud Monitoring query failed ({e.code}): {e.read().decode()[:200]}")
     except urllib.error.URLError as e:
-        # Network/TLS/DNS failure — can't measure the canary, so fail safe (don't promote
-        # something we can't verify). Surfaced as a config error => non-zero exit => rollback.
-        raise ConfigError(f"Datadog unreachable: {e.reason}")
-    return _sum_series(body)
+        # Can't measure the canary -> fail safe (non-zero exit -> rollback).
+        raise ConfigError(f"Cloud Monitoring unreachable: {e.reason}")
+    return _sum_points(body)
 
 
-def _sum_series(body):
-    """Sum every point across every returned series (0.0 if none)."""
+def _sum_points(body):
+    """Sum every point across every returned timeseries (0.0 if none)."""
     total = 0.0
-    for series in body.get("series", []) or []:
-        for point in series.get("pointlist", []) or []:
-            # pointlist entries are [timestamp_ms, value]; value may be null.
-            if len(point) == 2 and point[1] is not None:
-                total += point[1]
+    for series in body.get("timeSeries", []) or []:
+        for pt in series.get("points", []) or []:
+            v = pt.get("value", {})
+            val = v.get("int64Value", v.get("doubleValue"))
+            if val is not None:
+                total += float(val)
     return total
 
 
@@ -160,47 +155,38 @@ def evaluate(total_requests, error_requests, threshold, min_requests):
 def main():
     try:
         service = _env("SERVICE", required=True)
-        site = _env("DD_SITE", "datadoghq.com")
         region = _env("REGION", "us-central1")
         project = pick_project(os.environ.get("CANARY_PROJECT_ID"), os.environ.get("PROJECT"))
-        api_key = resolve_key("DD_API_KEY", "DD_API_KEY_SECRET",
-                              "humble-shared-stg-datadog-apikey", project)
-        app_key = resolve_key("DD_APP_KEY", "DD_APP_KEY_SECRET",
-                              "humble-shared-stg-datadog-appkey", project)
         threshold = float(_env("ERROR_RATE_THRESHOLD", "0.05"))
-        min_requests = float(_env("MIN_REQUESTS", "20"))
+        min_requests = float(_env("MIN_REQUESTS", "10"))
         window = int(_env("WINDOW_SECONDS", "300"))
+        bake = int(_env("BAKE_SECONDS", "30"))
+        poll_timeout = int(_env("POLL_TIMEOUT", "240"))
+        poll_interval = int(_env("POLL_INTERVAL", "30"))
 
         revision = _env("REVISION") or newest_revision(service, region, project)
-        scope = f"service_name:{service},revision_name:{revision}"
-
-        bake = int(_env("BAKE_SECONDS", "30"))
-        poll_timeout = int(_env("POLL_TIMEOUT", "420"))
-        poll_interval = int(_env("POLL_INTERVAL", "30"))
+        token = access_token()
         if bake > 0:
             print(f"[canary-verify] initial soak {bake}s...")
             time.sleep(bake)
 
-        # Poll until Datadog has ingested enough data to judge (the GCP integration lags
-        # several minutes) or the timeout elapses — THEN judge. A single query after a fixed
-        # bake can read an empty window and false-pass a broken canary. Once there are enough
-        # requests we stop early; if none arrive by the timeout, evaluate() returns SKIP.
+        # Poll until Cloud Monitoring has ingested enough data to judge (~1-2 min lag) or
+        # the timeout elapses, then judge. No data by timeout => SKIP (no-traffic canary).
         deadline = time.time() + poll_timeout
         total = errors = 0.0
         while True:
             to = int(time.time())
             frm = to - window
-            total = query_metric(site, api_key, app_key,
-                                 f"sum:gcp.run.request_count{{{scope}}}.as_count()", frm, to)
+            total = request_count(project, token, service, revision, frm, to, window)
             if total >= min_requests:
-                errors = query_metric(site, api_key, app_key,
-                    f"sum:gcp.run.request_count{{{scope},response_code_class:5xx}}.as_count()", frm, to)
+                errors = request_count(project, token, service, revision, frm, to, window, only_5xx=True)
                 break
             if time.time() >= deadline:
                 break
             print(f"[canary-verify] {total:.0f} requests so far (need {min_requests:.0f}); "
-                  f"waiting {poll_interval}s for Datadog to ingest...")
+                  f"waiting {poll_interval}s for metrics to settle...")
             time.sleep(poll_interval)
+            token = access_token()  # refresh in case of a long poll
 
         passed, reason = evaluate(total, errors, threshold, min_requests)
         print(f"[canary-verify] {service}@{revision}: {reason}")
