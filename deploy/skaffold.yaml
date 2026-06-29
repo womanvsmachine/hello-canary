@@ -21,10 +21,12 @@ verify:
       name: canary-error-rate
       image: us-central1-docker.pkg.dev/humblebundle-stg/hello-canary/verify:latest
       env:
+        # CANARY_PROJECT_ID (not PROJECT): Cloud Deploy overrides PROJECT with the
+        # numeric project number, which `gcloud run` rejects.
+        - { name: CANARY_PROJECT_ID, value: humblebundle-stg }
         - { name: SERVICE, value: hello-canary-stg }
-        - { name: PROJECT, value: humblebundle-stg }
         - { name: REGION, value: us-central1 }
         - { name: ERROR_RATE_THRESHOLD, value: "0.05" }
-        - { name: MIN_REQUESTS, value: "20" }
+        - { name: MIN_REQUESTS, value: "10" }
         - { name: WINDOW_SECONDS, value: "300" }
         - { name: BAKE_SECONDS, value: "150" }

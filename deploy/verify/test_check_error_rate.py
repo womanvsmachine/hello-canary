@@ -5,6 +5,23 @@ from unittest import mock
 import check_error_rate as cv
 
 
+def test_pick_project_prefers_canary_id():
+    assert cv.pick_project("humblebundle-stg", "631460809730") == "humblebundle-stg"
+
+
+def test_pick_project_rejects_numeric_project():
+    # Cloud Deploy injects the numeric project number into PROJECT — must fall back.
+    assert cv.pick_project(None, "631460809730") == "humblebundle-stg"
+
+
+def test_pick_project_uses_nonnumeric_project_env():
+    assert cv.pick_project(None, "some-other-proj") == "some-other-proj"
+
+
+def test_pick_project_empty_falls_back():
+    assert cv.pick_project(None, None) == "humblebundle-stg"
+
+
 def test_resolve_key_prefers_env():
     with mock.patch.dict(os.environ, {"DD_API_KEY": "from-env"}):
         assert cv.resolve_key("DD_API_KEY", "DD_API_KEY_SECRET", "sec", "proj") == "from-env"

@@ -19,7 +19,10 @@ Config is via env (only SERVICE is required; the rest default sanely):
   SERVICE                 Cloud Run service, e.g. hello-canary-stg (required).
   REVISION                Revision to judge; default = newest revision of SERVICE
                           (looked up via gcloud).
-  REGION, PROJECT         Cloud Run location/project for the revision lookup.
+  REGION                  Cloud Run location for the revision lookup (default us-central1).
+  CANARY_PROJECT_ID       Project ID for revision/secret lookups. Preferred over PROJECT,
+                          which Cloud Deploy overrides with the numeric project NUMBER
+                          (gcloud run rejects numbers). Falls back to humblebundle-stg.
   ERROR_RATE_THRESHOLD    Max acceptable 5xx fraction (default: 0.05 = 5%).
   MIN_REQUESTS            Min requests in-window to judge; below this the check
                           SKIPS (passes) so a no-traffic canary (hello-canary,
@@ -52,6 +55,16 @@ def _env(name, default=None, required=False):
     return val
 
 
+def pick_project(canary_project_id, project_env, default="humblebundle-stg"):
+    """Resolve the project ID for gcloud lookups.
+
+    Cloud Deploy injects PROJECT as the numeric project NUMBER, which `gcloud run`
+    rejects — so prefer CANARY_PROJECT_ID and never trust a numeric/empty value.
+    """
+    p = canary_project_id or project_env or ""
+    return default if (not p or p.isdigit()) else p
+
+
 def _fetch_secret(secret, project):
     """Latest enabled version of a Secret Manager secret (via gcloud)."""
     return subprocess.check_output(
@@ -78,13 +91,17 @@ def resolve_key(env_name, secret_env, default_secret, project):
 
 def newest_revision(service, region, project):
     """Newest revision name for a Cloud Run service (via gcloud)."""
-    out = subprocess.check_output(
-        ["gcloud", "run", "revisions", "list",
-         "--service", service, "--region", region, "--project", project,
-         "--sort-by", "~metadata.creationTimestamp", "--limit", "1",
-         "--format", "value(metadata.name)"],
-        text=True,
-    )
+    try:
+        out = subprocess.check_output(
+            ["gcloud", "run", "revisions", "list",
+             "--service", service, "--region", region, "--project", project,
+             "--sort-by", "~metadata.creationTimestamp", "--limit", "1",
+             "--format", "value(metadata.name)"],
+            text=True, stderr=subprocess.STDOUT,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        out = getattr(e, "output", "") or ""
+        raise ConfigError(f"could not list revisions for {service} in {project}/{region}: {out.strip() or e}")
     rev = out.strip().splitlines()[0] if out.strip() else ""
     if not rev:
         raise ConfigError(f"no revisions found for {service} in {project}/{region}")
@@ -140,7 +157,7 @@ def main():
         service = _env("SERVICE", required=True)
         site = _env("DD_SITE", "datadoghq.com")
         region = _env("REGION", "us-central1")
-        project = _env("PROJECT", "humblebundle-stg")
+        project = pick_project(os.environ.get("CANARY_PROJECT_ID"), os.environ.get("PROJECT"))
         api_key = resolve_key("DD_API_KEY", "DD_API_KEY_SECRET",
                               "humble-shared-stg-datadog-apikey", project)
         app_key = resolve_key("DD_APP_KEY", "DD_APP_KEY_SECRET",
