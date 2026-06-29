@@ -11,3 +11,20 @@ profiles:
   #   manifests: { rawYaml: [manifests/service-prd.yaml] }
 deploy:
   cloudrun: {}
+# Canary analysis (HBNXT-2108): runs only where the strategy sets verify:true (stg).
+# Queries Datadog for the new revision's 5xx rate; non-zero exit fails the phase and
+# trips the auto-rollback Automation. DD keys are self-fetched from Secret Manager by
+# the execution SA. Image is :latest (sandbox); pin per-release for prod.
+verify:
+  - name: canary-error-rate
+    container:
+      name: canary-error-rate
+      image: us-central1-docker.pkg.dev/humblebundle-stg/hello-canary/verify:latest
+      env:
+        - { name: SERVICE, value: hello-canary-stg }
+        - { name: PROJECT, value: humblebundle-stg }
+        - { name: REGION, value: us-central1 }
+        - { name: ERROR_RATE_THRESHOLD, value: "0.05" }
+        - { name: MIN_REQUESTS, value: "20" }
+        - { name: WINDOW_SECONDS, value: "300" }
+        - { name: BAKE_SECONDS, value: "150" }
